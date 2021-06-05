@@ -5,6 +5,7 @@
 #include "x86.h"
 #include "proc.h"
 #include "spinlock.h"
+#include "pstat.h"
 
 struct {
   struct spinlock lock;
@@ -98,6 +99,8 @@ userinit(void)
   p->cwd = namei("/");
 
   p->state = RUNNABLE;
+  p->tickets = 1;
+  p->ticks = 0;
   release(&ptable.lock);
 }
 
@@ -144,6 +147,7 @@ fork(void)
   np->sz = proc->sz;
   np->parent = proc;
   *np->tf = *proc->tf;
+  np->tickets = proc->tickets;
 
   // Clear %eax so that fork returns 0 in the child.
   np->tf->eax = 0;
@@ -155,6 +159,7 @@ fork(void)
  
   pid = np->pid;
   np->state = RUNNABLE;
+  np->ticks = 0;
   safestrcpy(np->name, proc->name, sizeof(proc->name));
   return pid;
 }
@@ -245,6 +250,27 @@ wait(void)
   }
 }
 
+int
+sumtickets(void)
+{
+  int gtickets = 0;
+  struct proc *p;
+  for (p = ptable.proc; p < &ptable.proc[NPROC]; p++) {
+    if (p->state == RUNNABLE) {
+      gtickets = gtickets + p->tickets;
+    }
+  }
+  return gtickets;
+}
+
+int
+prbs31(int prev)
+{
+  int newbit = (((prev >> 30) ^ (prev >> 27)) & 1);
+  int next = ((prev << 1) | newbit) & 0x7fffffff;
+  return next;
+}
+
 // Per-CPU process scheduler.
 // Each CPU calls scheduler() after setting itself up.
 // Scheduler never returns.  It loops, doing:
@@ -256,29 +282,65 @@ void
 scheduler(void)
 {
   struct proc *p;
+  int gtickets;
+  int counter;
+  int winner;
+  int seed = 0x7bf4a0b1;
 
   for(;;){
     // Enable interrupts on this processor.
     sti();
 
     // Loop over process table looking for process to run.
+    // acquire(&ptable.lock);
+    // for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+    //   if(p->state != RUNNABLE)
+    //     continue;
+
+    //   // Switch to chosen process.  It is the process's job
+    //   // to release ptable.lock and then reacquire it
+    //   // before jumping back to us.
+    //   proc = p;
+    //   switchuvm(p);
+    //   p->state = RUNNING;
+    //   swtch(&cpu->scheduler, proc->context);
+    //   switchkvm();
+
+    //   // Process is done running for now.
+    //   // It should have changed its p->state before coming back.
+    //   proc = 0;
+    // }
+    // release(&ptable.lock);
+    
+
+    // New lottery scheduler
     acquire(&ptable.lock);
-    for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
-      if(p->state != RUNNABLE)
-        continue;
+    gtickets = sumtickets();
+    counter = 0;
+    seed = prbs31(seed);
+    if (gtickets == 0) winner = 0;
+    else winner = seed % gtickets;
 
-      // Switch to chosen process.  It is the process's job
-      // to release ptable.lock and then reacquire it
-      // before jumping back to us.
-      proc = p;
-      switchuvm(p);
-      p->state = RUNNING;
-      swtch(&cpu->scheduler, proc->context);
-      switchkvm();
+    for (p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+      if (p->state != RUNNABLE) continue;
+      counter += p->tickets;
+      if (counter > winner) {
+        // Switch to chosen process.  It is the process's job
+        // to release ptable.lock and then reacquire it
+        // before jumping back to us.
+        // cprintf("process %s (tkt=%d, pid=%d, tick=%d)\n", p->name, p->tickets, p->pid, p->ticks);
+        proc = p;
+        switchuvm(p);
+        p->state = RUNNING;
+        p->ticks++;
+        swtch(&cpu->scheduler, proc->context);
+        switchkvm();
 
-      // Process is done running for now.
-      // It should have changed its p->state before coming back.
-      proc = 0;
+        // Process is done running for now.
+        // It should have changed its p->state before coming back.
+        proc = 0;
+        break;
+      }
     }
     release(&ptable.lock);
 
@@ -443,4 +505,26 @@ procdump(void)
   }
 }
 
+int
+settickets(int number)
+{
+  if (number < 1) proc->tickets = 1;
+  else proc->tickets = number;
+  return 0;
+}
 
+int
+getpinfo(struct pstat *ps)
+{
+  struct proc p;
+  for (int i = 0; i < NPROC; i++) {
+    p = ptable.proc[i];
+    ps->inuse[i] = p.state != UNUSED;
+    if (ps->inuse[i]) {
+      ps->tickets[i] = p.tickets;
+      ps->pid[i] = p.pid;
+      ps->ticks[i] = p.ticks;
+    }
+  }
+  return 0;
+}

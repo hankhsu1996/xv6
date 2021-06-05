@@ -5,6 +5,7 @@
 #include "mmu.h"
 #include "proc.h"
 #include "sysfunc.h"
+#include "pstat.h"
 
 int
 sys_fork(void)
@@ -88,3 +89,34 @@ sys_uptime(void)
   release(&tickslock);
   return xticks;
 }
+
+int
+sys_settickets(void)
+{
+  int number;
+
+  if(argint(0, &number) < 0)
+    return -1;
+  
+  return settickets(number);
+}
+
+int sys_getpinfo(void)
+{
+  struct pstat *ps;
+
+  if (argptr(0, (char**)&ps, sizeof(struct pstat)) < 0)
+    return -1;
+  return getpinfo(ps);
+}
+
+// sys_read(void)
+// {
+//   struct file *f;
+//   int n;
+//   char *p;
+
+//   if(argfd(0, 0, &f) < 0 || argint(2, &n) < 0 || argptr(1, &p, n) < 0)
+//     return -1;
+//   return fileread(f, p, n);
+// }
